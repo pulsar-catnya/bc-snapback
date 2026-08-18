@@ -1,4 +1,4 @@
-USE "/snap" or "/回溯" show snapback ui
+USE "/snap" or "/回溯" or reange button show snapback ui
 
 
 tampermonky link
