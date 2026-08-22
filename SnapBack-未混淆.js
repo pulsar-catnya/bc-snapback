@@ -33,6 +33,41 @@ function SBDeepClone(x) {
 
  
 
+ 
+function SBStateReplacer(key, value) {
+	if (key === "chg" || key === "hash" || key === "first" || key === "last") return undefined;
+	return value;
+}
+
+ 
+function SBStateSerialize(state) {
+	let json;
+	try { json = JSON.stringify(state, SBStateReplacer); } catch (e) { return null; }
+	try {
+		if (typeof LZString !== "undefined" && typeof LZString.compressToUTF16 === "function") {
+			return "SBZ:" + LZString.compressToUTF16(json);
+		}
+	} catch (e) {   }
+	return json;
+}
+
+ 
+function SBStateDeserialize(raw) {
+	if (typeof raw !== "string" || !raw) return null;
+	try {
+		if (raw.indexOf("SBZ:") === 0) {
+			if (typeof LZString === "undefined" || typeof LZString.decompressFromUTF16 !== "function") return null;
+			const json = LZString.decompressFromUTF16(raw.slice(4));
+			if (json === null || json === undefined) return null;
+			raw = json;
+		}
+		const s = JSON.parse(raw);
+		return (s && typeof s === "object" && s.chars && typeof s.chars === "object") ? s : null;
+	} catch (e) { return null; }
+}
+
+ 
+
 const SBStore = {
 	accountNum: null,       
 	state: null,
@@ -43,7 +78,7 @@ const SBStore = {
 	},
 
 	emptyState() {
-		return { v: 2, settings: { keep: 50, autoClearOthers: true, keepFirst: true }, deletedAllAt: 0, gone: {}, chars: {}, favs: [], favGone: {} };
+		return { v: 2, settings: { keep: 20, autoClearOthers: true, keepFirst: false }, deletedAllAt: 0, gone: {}, chars: {}, favs: [], favGone: {} };
 	},
 
 	 
@@ -52,9 +87,9 @@ const SBStore = {
 		s.v = 2;
 		if (!s.settings || typeof s.settings !== "object") s.settings = {};
 		const keepRaw = s.settings.keep | 0;
-		s.settings.keep = (keepRaw >= 3 && keepRaw <= 500) ? keepRaw : 50;
+		s.settings.keep = (keepRaw >= 3 && keepRaw <= 500) ? keepRaw : 20;
 		if (typeof s.settings.autoClearOthers !== "boolean") s.settings.autoClearOthers = true;
-		if (typeof s.settings.keepFirst !== "boolean") s.settings.keepFirst = true; 
+		if (typeof s.settings.keepFirst !== "boolean") s.settings.keepFirst = false; 
 		if (typeof s.deletedAllAt !== "number") s.deletedAllAt = 0;
 		if (!s.gone || typeof s.gone !== "object" || Array.isArray(s.gone)) s.gone = {};
 		
@@ -108,6 +143,19 @@ const SBStore = {
 				e.first = !prev;
 				e.chg = SBDiffOf(prev, e);
 			});
+			
+			if (c.history.length) {
+				let oldest = null, newest = null;
+				for (const e of c.history) {
+					if (!oldest || e.t < oldest.t) oldest = e;
+					if (!newest || e.t > newest.t) newest = e;
+				}
+				c.first = oldest.t;
+				c.last = newest.t;
+			} else {
+				c.first = null;
+				c.last = 0;
+			}
 		}
 		
 		SBTrimGlobalCap(s, s.settings.keep);
@@ -122,14 +170,8 @@ const SBStore = {
 		if (this.accountNum !== null && this.accountNum > 0) {
 			const raw = SBStorage.get(this.baseKey());
 			this._lastDiskRaw = raw;
-			if (raw) {
-				try {
-					const s = JSON.parse(raw);
-					if (s && typeof s === "object" && s.chars && typeof s.chars === "object") {
-						this.state = this.normalize(s);
-					}
-				} catch (e) {   }
-			}
+			const s = SBStateDeserialize(raw);
+			if (s) this.state = this.normalize(s);
 		}
 		return this.state;
 	},
@@ -151,27 +193,23 @@ const SBStore = {
 		
 		if (raw !== this._lastDiskRaw) {
 			this._lastDiskRaw = raw;
-			if (raw) {
-				try {
-					const disk = JSON.parse(raw);
-					if (disk && typeof disk === "object" && disk.chars && typeof disk.chars === "object") {
-						const res = SBMergeInto(this.state, disk);
-						if (res.changed) {
-							SBUI.dirty = true;
-						}
-					}
-				} catch (e) {   }
+			const disk = SBStateDeserialize(raw);
+			if (disk) {
+				const res = SBMergeInto(this.state, disk);
+				if (res.changed) {
+					SBUI.dirty = true;
+				}
 			}
 		}
 		
 		if (!this._dirty) return false;
-		let json;
-		try { json = JSON.stringify(this.state); } catch (e) { return false; }
-		if (json === this._lastWritten) return false;
-		this._lastWritten = json;
-		this._lastDiskRaw = json; 
+		const out = SBStateSerialize(this.state);
+		if (out === null) return false;
+		if (out === this._lastWritten) return false;
+		this._lastWritten = out;
+		this._lastDiskRaw = out; 
 		this._dirty = false;
-		return SBStorage.set(key, json);
+		return SBStorage.set(key, out);
 	},
 
 	 
@@ -881,7 +919,7 @@ function SBCollectAll(trigger) {
 
 function SBExportJSON() {
 	const s = SBStore.load();
-	return JSON.stringify({ v: s.v, settings: s.settings, chars: s.chars, favs: s.favs, favGone: s.favGone }, null, 2);
+	return JSON.stringify({ v: s.v, settings: s.settings, chars: s.chars, favs: s.favs, favGone: s.favGone }, SBStateReplacer, 2);
 }
 
  
@@ -894,7 +932,7 @@ function SBExportCharJSON(num) {
 		chars: { [String(num)]: c },
 		favs: s.favs.filter(f => f.num === num),
 		favGone: s.favGone,
-	}, null, 2);
+	}, SBStateReplacer, 2);
 }
 
  
@@ -1564,7 +1602,7 @@ const SBText = {
 		btnImport: "导入", btnImportTitle: "从 .txt 文件或粘贴文本导入数据（与现有数据合并）",
 		btnClear: "清空", btnClearTitle: "删除全部快照数据（不可恢复！）",
 		optClearOthers: "离开清理", optClearOthersTitle: "离开房间时自动清空其他玩家的快照（保留自己的；掉线重连不会触发）",
-		optKeepFirst: "保留初始记录", optKeepFirstTitle: "离开房间清理时，每个其他玩家保留最早一条「初始记录」（不勾选则连初始记录一起清理）",
+		optKeepFirst: "保留初始记录", optKeepFirstTitle: "离开房间清理时，每个其他玩家保留最早一条「初始记录」（默认关闭；不勾选则连初始记录一起清理）",
 		toastClearedOthers: "已清理 {0} 个其他玩家的快照（自己的保留）",
 		btnLangTitle: "切换界面语言 / Switch UI language",
 		toastLang: "界面语言：中文",
@@ -1654,7 +1692,7 @@ const SBText = {
 		btnImport: "Import", btnImportTitle: "Import data from clipboard (merge)",
 		btnClear: "Clear all", btnClearTitle: "Delete ALL snapshot data (irreversible!)",
 		optClearOthers: "Clear on leave", optClearOthersTitle: "When leaving a room, clear other players' snapshots (yours are kept; disconnects do not trigger this)",
-		optKeepFirst: "Keep initial records", optKeepFirstTitle: "When clearing on leave, keep the earliest \"initial record\" of each other player (uncheck to clear initial records too)",
+		optKeepFirst: "Keep initial records", optKeepFirstTitle: "When clearing on leave, keep the earliest \"initial record\" of each other player (off by default; uncheck to clear initial records too)",
 		toastClearedOthers: "Cleared snapshots of {0} other players (yours kept)",
 		btnLangTitle: "切换界面语言 / Switch UI language",
 		toastLang: "UI language: English",
@@ -3885,7 +3923,7 @@ function SBMain() {
 			const mod = bcModSdk.registerMod({
 				name: "SnapBack",
 				fullName: "SnapBack — 时空回溯快照",
-				version: "1.1.53",
+				version: "1.1.54",
 				repository: "",
 			}, { allowReplace: true });
 			SBHooks.mod = mod;
